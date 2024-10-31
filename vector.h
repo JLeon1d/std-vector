@@ -3,6 +3,8 @@
 #include <initializer_list>
 #include <algorithm>
 #include <memory>
+#include <type_traits>
+#include <iterator>
 
 template <class T>
 class Vector {
@@ -34,7 +36,7 @@ public:
 
         Iterator& operator=(Iterator&& other) {
             if (this == &other) {
-                return;
+                return *this;
             }
 
             elem_ = other.elem_;
@@ -64,22 +66,12 @@ public:
             return old;
         }
 
-        Iterator& operator+=(const Iterator& other) {
-            elem_ += other.elem_;
-            return *this;
-        }
-
-        Iterator& operator-=(const Iterator& other) {
-            elem_ -= other.elem_;
-            return *this;
-        }
-
-        Iterator& operator+=(size_t num) {
+        Iterator& operator+=(size_type num) {
             elem_ += num;
             return *this;
         }
 
-        Iterator& operator-=(size_t num) {
+        Iterator& operator-=(size_type num) {
             elem_ -= num;
             return *this;
         }
@@ -96,20 +88,20 @@ public:
             return elem_;
         }
 
-        friend Iterator operator+(const Iterator& left, const Iterator& right) {
-            return Iterator(left.elem_ + right.elem_);
-        }
-
-        friend Iterator operator+(const Iterator& left, size_t right) {
+        friend Iterator operator+(const Iterator& left, size_type right) {
             return Iterator(left.elem_ + right);
         }
 
-        friend Iterator operator+(size_t left, const Iterator& right) {
+        friend Iterator operator+(size_type left, const Iterator& right) {
             return Iterator(left + right.elem_);
         }
 
-        friend Iterator operator-(const Iterator& left, const Iterator& right) {
-            return Iterator(left.elem_ - right.elem_);
+        friend std::ptrdiff_t operator-(const Iterator& left, const Iterator& right) {
+            if (left.elem_ < right.elem_) {
+                return right.elem_ - left.elem_;
+            } else {
+                return left.elem_ - right.elem_;
+            }
         }
 
         friend bool operator==(const Iterator& left, const Iterator& right) {
@@ -129,8 +121,13 @@ public:
     // constructors
     Vector() = default;
 
-    explicit Vector(size_t size) : size_(size), cap_(size) {
+    explicit Vector(size_type size) : size_(size), cap_(size) {
         data_ = std::make_unique<T[]>(size);
+    }
+
+    explicit Vector(size_type size, const T& value) : size_(size), cap_(size) {
+        data_ = std::make_unique<T[]>(size);
+        std::fill(data_.get(), data_.get() + size, value);
     }
 
     Vector(std::initializer_list<T> list) : size_(list.size()), cap_(list.size()) {
@@ -176,7 +173,7 @@ public:
         size_ = other.size_;
         cap_ = other.cap_;
 
-        data_ = std::make_unique<T[]>(cap_);  // allocating cap
+        data_ = std::make_unique<T[]>(cap_);
         std::copy(other.data_.get(), other.data_.get() + other.size_, data_.get());
         return *this;
     }
@@ -196,16 +193,15 @@ public:
     }
 
     Vector& operator=(std::initializer_list<T> list) {
-        size_ = list.size();
-        cap_ = list.size();
+        size_ = cap_ = list.size();
         data_ = std::make_unique<T[]>(cap_);
         std::copy(list.begin(), list.end(), data_.get());
+        return *this;
     }
 
     // assign
     void assign(size_t count, const T& value) {
-        size_ = count;
-        cap_ = count;
+        size_ = cap_ = count;
         data_ = std::make_unique<T[]>(size_);
         std::fill(data_.get(), data_.get() + count, value);
     }
@@ -219,7 +215,7 @@ public:
     }
 
     void assign(std::initializer_list<T> ilist) {
-        cap_ = size_ = ilist.size();
+        size_ = cap_ = ilist.size();
         data_ = std::make_unique<T[]>(size_);
         std::copy(ilist.begin(), ilist.end(), data_.get());
     }
@@ -275,19 +271,19 @@ public:
 
     // iterators
     iterator begin() noexcept {
-        return (data_ == nullptr ? nullptr : Iterator(&data_[0]));
+        return (data_ == nullptr or size_ == 0 ? nullptr : Iterator(&data_[0]));
     }
 
     const_iterator begin() const noexcept {
-        return (data_ == nullptr ? nullptr : Iterator(&data_[0]));
+        return (data_ == nullptr or size_ == 0 ? nullptr : Iterator(&data_[0]));
     }
 
     const_iterator cbegin() const noexcept {
-        return (data_ == nullptr ? nullptr: Iterator(&data_[0]));
+        return (data_ == nullptr or size_ == 0 ? nullptr: Iterator(&data_[0]));
     }
 
     iterator end() noexcept {
-        if (data_ == nullptr) {
+        if (data_ == nullptr or size_ == 0) {
             return nullptr;
         }
 
@@ -297,7 +293,7 @@ public:
     }
 
     const_iterator end() const noexcept {
-        if (data_ == nullptr) {
+        if (data_ == nullptr or size_ == 0) {
             return nullptr;
         }
 
@@ -307,7 +303,7 @@ public:
     }
 
     const_iterator cend() const noexcept {
-        if (data_ == nullptr) {
+        if (data_ == nullptr or size_ == 0) {  // UB was here
             return nullptr;
         }
 
@@ -332,10 +328,13 @@ public:
     void reserve(size_t new_cap) {
         if (new_cap <= cap_) {
             return;
+        } else if (new_cap > max_size()) {
+            throw std::length_error("Vector::reserve: new_cap is too large");
         }
 
         std::unique_ptr<T[]> new_data = std::make_unique<T[]>(new_cap);
-        std::copy(data_.get(), data_.get() + size_, new_data.get());
+        move_or_copy(data_.get(), new_data.get(), size_);
+
         data_ = std::move(new_data);
         cap_ = new_cap;
     }
@@ -350,7 +349,8 @@ public:
         }
 
         std::unique_ptr<T[]> new_data = std::make_unique<T[]>(size_);
-        std::copy(data_.get(), data_.get() + size_, new_data.get());
+        move_or_copy(data_.get(), new_data.get(), size_);
+
         data_ = std::move(new_data);
         cap_ = size_;
     }
@@ -360,24 +360,28 @@ public:
     }
 
     iterator insert(const_iterator pos, const T& value) { 
-        auto id = distance(begin(), pos);
+        size_t id = static_cast<size_t>(pos - begin());
         if (size_ == cap_) {
             relocate();
         }
 
-        std::copy(data_.get() + id, data_.get() + size_, data_.get() + id + 1);
+        if (id != size_) {
+            std::copy(data_.get() + id, data_.get() + size_, data_.get() + id + 1);
+        }
         data_[id] = value;
         ++size_;
         return Iterator(data_.get() + id);
     }
 
     iterator insert(const_iterator pos, T&& value) {
-        auto id = distance(begin(), pos);
+        size_t id = static_cast<size_t>(pos - begin());
         if (size_ == cap_) {
             relocate();
         }
 
-        std::copy(data_.get() + id, data_.get() + size_, data_.get() + id + 1);
+        if (id != size_) {
+            std::copy(data_.get() + id, data_.get() + size_, data_.get() + id + 1);
+        }
         data_[id] = std::move(value);
         ++size_;
         return Iterator(data_.get() + id);
@@ -386,7 +390,7 @@ public:
     // iterator emplace(const_iterator pos, Args&&... args); in this realisation will be the same insert(
 
     iterator erase(const_iterator pos) {
-        auto id = distance(begin(), pos);
+        size_t id = static_cast<size_t>(pos - begin());
 
         std::copy(data_.get() + id + 1, data_.get() + size_, data_.get() + id);
         --size_;
@@ -398,7 +402,13 @@ public:
             relocate();
         }
 
-        data_[size_++] = value;
+        try {
+            data_[size_] = value;
+        } catch (...) {
+            throw;
+        }
+
+        ++size_;
     }
 
     void push_back(T&& value) {
@@ -406,7 +416,13 @@ public:
             relocate();
         }
 
-        data_[size_++] = std::move(value);
+        try {
+            data_[size_] = std::move(value);
+        } catch (...) {
+            throw;
+        }
+
+        ++size_;
     }
 
     template <class... Args>
@@ -415,14 +431,20 @@ public:
             relocate();
         }
 
-        data_[size_++] = T(std::forward<Args>(args)...);
+        try {
+            data_[size_] = T(std::forward<Args>(args)...);
+        } catch (...) {
+            throw;
+        }
+
+        ++size_;
     }
 
     void pop_back() {
         --size_;
     }
 
-    void resize(size_t new_size) {
+    void resize(size_type new_size) {  // no strong exception safety guarantee
         if (new_size == size_) {
             return;
         } else if (new_size > size_) {
@@ -430,7 +452,7 @@ public:
             std::fill(data_.get() + size_, data_.get() + new_size, value_type());
         } else {
             std::unique_ptr<T[]> new_data = std::make_unique<T[]>(new_size);
-            std::copy(data_.get(), data_.get() + new_size, new_data.get());
+            move_or_copy(data_.get(), new_data.get(), new_size);
             cap_ = size_ = new_size;
             data_ = std::move(new_data);
         }
@@ -438,7 +460,7 @@ public:
         size_ = new_size;
     }
 
-    void resize(size_type new_size, const value_type& value) {
+    void resize(size_type new_size, const value_type& value) {  // no strong exception safety guarantee
         if (new_size > size_) {
             reserve(new_size);
             std::fill(data_.get() + size_, data_.get() + new_size, value);
@@ -478,8 +500,8 @@ public:
     }
 
 private:
-    size_t size_ = 0;
-    size_t cap_ = 0;
+    size_t size_ = 0u;
+    size_t cap_ = 0u;
     std::unique_ptr<T[]> data_ = nullptr;
 
     void relocate() {
@@ -490,7 +512,11 @@ private:
         }
     }
 
-    size_t distance(const_iterator first, const_iterator last) const {
-        return (last.GetPointer() - first.GetPointer());
+    void move_or_copy(T* src, T* dst, size_t count) {
+        if constexpr (std::is_move_constructible_v<T> and std::is_move_assignable_v<T>) {
+            std::move(src, src + count, dst);
+        } else {
+            std::copy(src, src + count, dst);
+        }
     }
 };

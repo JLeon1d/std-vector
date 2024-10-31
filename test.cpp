@@ -29,6 +29,10 @@ void Constructors() {
         Vector<int> a(5);
         Check(a, std::vector<int>(5));
     }
+    {
+        Vector<int> a(5, 1);
+        Check(a, std::vector<int>(5, 1));
+    }
 }
 
 void Basic() {
@@ -191,6 +195,13 @@ void Iterators() {
 
         Check(a, std::vector<int>{2, 3, 4, 5});
     }
+    {
+        Vector<int> a = {1, 2, 3, 4, 5};
+        a.clear();
+        REQUIRE(a.begin() == a.end());
+        a.push_back(1);
+        REQUIRE(a.begin() + 1 == a.end());
+    }
 }
 
 void Assign() {
@@ -264,7 +275,7 @@ void Equal() {
 }
 
 // g++ -fsanitize=address test.cpp -o test -O2 -std=c++20 && ./test
-// g++ -fsanitize=undefined test_.cpp -o test -O2 -std=c++20 && ./test
+// g++ -fsanitize=undefined test.cpp -o test -O2 -std=c++20 && ./test
 int main() {
     Constructors();
     Basic();
